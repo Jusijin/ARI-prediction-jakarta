@@ -1,0 +1,2264 @@
+---
+title: "Prediksi Kasus ISPA di Jakarta Berdasarkan Kualitas Udara dan Faktor Meteorologi"
+author: "Nico Handoko dan Annisa Meta Nadjwa"
+date: "2026-04-11"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup-library}
+library(readr)
+library(tidyr)
+library(lubridate)
+library(zoo)
+library(moments)
+library(ggplot2)
+library(car)
+library(mgcv)
+library(corrplot)
+library(forecast)
+library(forcats)
+library(tseries)
+library(lmtest)
+library(e1071)
+library(xgboost)
+library(iml)
+library(MASS)
+library(lmtest)
+library(nlme)
+library(dplyr)
+```
+
+# Bagian A. Data Pre-Processing
+## A.1. Import Data
+Terdapat 3 sumber dataset mentah: (1) Kualitas udara ISPU yang sudah berbentuk rekap bulanan (2 file, digabung karena mencakup rentang waktu yang berbeda), (2) data cuaca harian, (3) jumlah kasus ISPA bulanan.
+
+```{r}
+# Data ISPU, ISPU2, Cuaca, dan ISPA
+data_ispu <- read.table("ispu.csv", sep=";", header=T, stringsAsFactors = FALSE, na = c("N/A", "", "NA"))
+data_ispu2 <- read.csv2("ispu_ff.csv", sep=";", header=T, stringsAsFactors = FALSE, na = c("N/A", "", "NA"))
+data_cuaca <- read.table("cuaca.csv", sep=";", header=T, na = c("N/A", "", "NA"))
+data_ispa <- read.csv("ispa.csv", sep=",", header=T, na = c("N/A", "", "NA"))
+```
+
+## A.1.1. Cek Struktur Dataset
+```{r}
+# Mengecek struktur dataset yang sudah diinput ke dalam RStudio
+str(data_ispu)
+summary(data_ispu)
+
+str(data_ispu2)
+summary(data_ispu2)
+
+str(data_cuaca)
+summary(data_cuaca)
+
+str(data_ispa)
+summary(data_ispa)
+```
+
+## A.2. Data Cleaning
+### A.2.1. Imputasi Missing Value & Gabungkan Kedua Data ISPU
+```{r}
+# Mengubah tipe variabel Tanggal
+data_ispu$Tanggal <- dmy(data_ispu$Tanggal)
+data_ispu2$Tanggal <- dmy(data_ispu2$Tanggal)
+```
+
+```{r}
+# Mengecek tipe data variabel Tanggal
+class(data_ispu$Tanggal)
+class(data_ispu2$Tanggal)
+```
+
+```{r}
+# Mengecek jangkauan tanggal dari data ispu
+range(data_ispu$Tanggal)
+range(data_ispu2$Tanggal)
+```
+
+```{r}
+# Mengecek data Missing Values pada seluruh data ispu
+colSums(is.na(data_ispu))
+colSums(is.na(data_ispu2))
+```
+
+```{r}
+# Mengisi variabel yang kosong dengan nilai aproksimasi/perkiraan
+data_ispu$PM2.5 <- na.approx(data_ispu$PM2.5, na.rm = FALSE)
+data_ispu$PM10 <- na.approx(data_ispu$PM10, na.rm = FALSE)
+data_ispu$SO2  <- na.approx(data_ispu$SO2, na.rm = FALSE)
+data_ispu$CO   <- na.approx(data_ispu$CO, na.rm = FALSE)
+data_ispu$O3   <- na.approx(data_ispu$O3, na.rm = FALSE)
+data_ispu$NO2  <- na.approx(data_ispu$NO2, na.rm = FALSE)
+```
+
+```{r}
+# Mengisi stasiun
+data_ispu <- data_ispu %>% fill(Stasiun, .direction = "downup")
+```
+
+```{r}
+# Mengubah nilai max yang terbaru dari variabel polutan
+data_ispu$MAX <- pmax(data_ispu$PM2.5, data_ispu$PM10, data_ispu$SO2, data_ispu$CO, data_ispu$O3, data_ispu$NO2, na.rm = TRUE)
+```
+
+```{r}
+# Mengubah variabel critical yang terbaru
+data_ispu$CRITICAL <- colnames(
+  data_ispu[,c("PM2.5","PM10","SO2","CO","O3","NO2")]
+)[max.col(
+  data_ispu[,c("PM2.5","PM10","SO2","CO","O3","NO2")],
+  ties.method = "first"
+)]
+```
+
+```{r}
+# Mengubah variabel Category yang terbaru
+data_ispu$CATEGORY <- case_when(
+  data_ispu$MAX <= 50 ~ "Good",
+  data_ispu$MAX <= 100 ~ "Moderate",
+  data_ispu$MAX <= 200 ~ "Unhealthly",
+  data_ispu$MAX <= 300 ~ "Very Unhealthly",
+  TRUE ~ "Hazardous"
+)
+```
+
+```{r}
+# Mengecek apakah variabel data ispu masih terdapat data yang kosong
+colSums(is.na(data_ispu))
+```
+
+```{r}
+# Memperbaiki nilai variabel MAX, CRITICAL, dan CATEGORY di data_ispu2
+data_ispu2$MAX <- pmax(data_ispu2$PM2.5, data_ispu2$PM10, data_ispu2$SO2, data_ispu2$CO, data_ispu2$O3, data_ispu2$NO2, na.rm = TRUE)
+
+data_ispu2$CRITICAL <- colnames(
+  data_ispu2[,c("PM2.5","PM10","SO2","CO","O3","NO2")]
+)[max.col(
+  data_ispu2[,c("PM2.5","PM10","SO2","CO","O3","NO2")],
+  ties.method = "first"
+)]
+
+data_ispu2$CATEGORY <- case_when(
+  data_ispu2$MAX <= 50 ~ "Good",
+  data_ispu2$MAX <= 100 ~ "Moderate",
+  data_ispu2$MAX <= 200 ~ "Unhealthly",
+  data_ispu2$MAX <= 300 ~ "Very Unhealthly",
+  TRUE ~ "Hazardous"
+)
+```
+
+```{r}
+# Menghitung nilai rata-rata per stasiun dari variabel ISPU
+ispu_harian <- data_ispu %>%
+  group_by(Tanggal) %>%
+  summarise(
+    PM2.5 = mean(PM2.5, na.rm = TRUE),
+    PM10 = mean(PM10, na.rm = TRUE),
+    SO2  = mean(SO2, na.rm = TRUE),
+    CO   = mean(CO, na.rm = TRUE),
+    O3   = mean(O3, na.rm = TRUE),
+    NO2  = mean(NO2, na.rm = TRUE)
+  )
+
+# Menambahkan variabel MAX, CRITICAL, dan CATEGORY di ispu_harian
+ispu_harian$MAX <- pmax(ispu_harian$PM2.5, ispu_harian$PM10, ispu_harian$SO2, ispu_harian$CO, ispu_harian$O3, ispu_harian$NO2, na.rm = TRUE)
+
+ispu_harian$CRITICAL <- colnames(
+  ispu_harian[,c("PM2.5","PM10","SO2","CO","O3","NO2")]
+)[max.col(
+  ispu_harian[,c("PM2.5","PM10","SO2","CO","O3","NO2")],
+  ties.method = "first"
+)]
+
+ispu_harian$CATEGORY <- case_when(
+  ispu_harian$MAX <= 50 ~ "Good",
+  ispu_harian$MAX <= 100 ~ "Moderate",
+  ispu_harian$MAX <= 200 ~ "Unhealthly",
+  ispu_harian$MAX <= 300 ~ "Very Unhealthly",
+  TRUE ~ "Hazardous"
+)
+```
+
+```{r}
+# Menghitung nilai rata-rata per stasiun dari data_ispu2
+ispu_harian2 <- data_ispu2 %>%
+  group_by(Tanggal) %>%
+  summarise(
+    PM2.5 = mean(PM2.5, na.rm = TRUE),
+    PM10 = mean(PM10, na.rm = TRUE),
+    SO2  = mean(SO2, na.rm = TRUE),
+    CO   = mean(CO, na.rm = TRUE),
+    O3   = mean(O3, na.rm = TRUE),
+    NO2  = mean(NO2, na.rm = TRUE)
+  )
+
+# Menambahkan variabel MAX, CRITICAL, dan CATEGORY di ispu_harian2
+ispu_harian2$MAX <- pmax(ispu_harian2$PM2.5, ispu_harian2$PM10, ispu_harian2$SO2, ispu_harian2$CO, ispu_harian2$O3, ispu_harian2$NO2, na.rm = TRUE)
+
+ispu_harian2$CRITICAL <- colnames(
+  ispu_harian2[,c("PM2.5","PM10","SO2","CO","O3","NO2")]
+)[max.col(
+  ispu_harian2[,c("PM2.5","PM10","SO2","CO","O3","NO2")],
+  ties.method = "first"
+)]
+
+ispu_harian2$CATEGORY <- case_when(
+  ispu_harian2$MAX <= 50 ~ "Good",
+  ispu_harian2$MAX <= 100 ~ "Moderate",
+  ispu_harian2$MAX <= 200 ~ "Unhealthly",
+  ispu_harian2$MAX <= 300 ~ "Very Unhealthly",
+  TRUE ~ "Hazardous"
+)
+```
+
+```{r}
+# Gabungkan data ispu_harian & ispu_harian2
+ispu_harian_gabung <- bind_rows(ispu_harian, ispu_harian2)
+```
+
+```{r}
+# Gabungkan data ispu & ispu2
+ispu_gabung <- bind_rows(data_ispu, data_ispu2)
+```
+
+### A.2.2. Imputasi Missing Value Data Cuaca
+```{r}
+# Mengecek variabel data_cuaca
+str(data_cuaca)
+```
+
+```{r}
+# Mengubah tipe variabel Tanggal
+data_cuaca$Tanggal <- dmy(data_cuaca$Tanggal)
+
+# Tipe data yang masih int akan diubah ke dalam num dari variabel cuaca
+cols_temp <- c("Kelembaban.Rata.Rata", "Tutupan.Awan.Rata.Rata")
+
+data_cuaca[cols_temp] <- lapply(data_cuaca[cols_temp], as.numeric)
+```
+
+```{r}
+# Mengecek nilai variabel pada data cuaca
+colSums(is.na(data_cuaca))
+```
+
+```{r}
+# Menghapus variabel yang tidak dibutuhkan pada data cuaca
+# data_cuaca <- data_cuaca %>% select(Tanggal, Stasiun, Suhu.Rata.Rata, Kelembaban.Rata.Rata ,Total.Curah.Hujan, Tutupan.Awan.Rata.Rata, Kecepatan.Angin.Rata.rata, Tekanan.Udara.Rata.Rata)
+```
+
+```{r}
+# Mengubah nama variabel pada data cuaca
+data_cuaca <- data_cuaca %>%
+  rename(
+    TEMP = Suhu.Rata.Rata,
+    HUM = Kelembaban.Rata.Rata,
+    RAIN = Total.Curah.Hujan,
+    CC = Tutupan.Awan.Rata.Rata,
+    WSPM = Kecepatan.Angin.Rata.rata,
+    PRES = Tekanan.Udara.Rata.Rata
+  )
+```
+
+```{r}
+# Mengecek tipe data variabel pada data cuaca
+str(data_cuaca)
+```
+
+```{r}
+library(dplyr)
+```
+
+```{r}
+# Mengubah data cuaca dari nilai 5 stasiun menjadi nilai rata-rata per hari sesuai dengan variabel data cuaca
+cuaca_harian <- data_cuaca %>%
+  group_by(Tanggal) %>%
+  summarise(
+    TEMP = mean(TEMP, na.rm = TRUE),
+    HUM = mean(HUM, na.rm = TRUE),
+    RAIN = mean(RAIN, na.rm = TRUE),
+    CC = mean(CC, na.rm = TRUE),
+    WSPM = mean(WSPM, na.rm = TRUE),
+    PRES = mean(PRES, na.rm = TRUE)
+  )
+```
+
+```{r}
+# Download Data Cuaca Harian, 5 Stasiun yang sama dengan ISPU
+write.csv(cuaca_harian, "cuaca_harian.csv")
+```
+
+### A.2.3. Penggabungan Data ISPU Harian Dengan Data Cuaca Harian
+```{r}
+library(lubridate)
+```
+
+```{r}
+# Gabungkan data ispu harian dengan data cuaca harian menjadi satu data
+ispu_cuaca_harian <- ispu_harian_gabung %>%
+  inner_join(cuaca_harian, by = "Tanggal")
+```
+
+```{r}
+# Membuat variabel kategori hujan di data ispu_cuaca_harian
+ispu_cuaca_harian <- ispu_cuaca_harian %>%
+  mutate(
+    RAIN_CATEGORY = case_when(
+      RAIN == 0 ~ "No Rain",
+      RAIN < 5 ~ "Very Light Rain",
+      RAIN < 20 ~ "Light Rain",
+      RAIN < 50 ~ "Moderate Rain",
+      RAIN < 100 ~ "Heavy Rain",
+      TRUE ~ "Very Heavy Rain"
+    )
+  )
+
+# Membuat variabel kategori kelembaban di ispu_cuaca_harian
+ispu_cuaca_harian <- ispu_cuaca_harian %>%
+  mutate(
+    HUM_CATEGORY = case_when(
+      HUM < 45 ~ "Low Humidity",
+      HUM < 65 ~ "Optimal Humidity",
+      TRUE ~ "High Humidity"
+    )
+  )
+```
+
+### A.2.4. Mengecek Outlier (Boxplot per Polutan)
+Sesi ini mengecek nilai outlier pada seluruh variabel ISPU.
+
+#### A.2.4.1. Variabel PM2.5
+```{r}
+boxplot(ispu_harian_gabung$PM2.5)
+
+boxplot.stats(ispu_harian_gabung$PM2.5)$out
+```
+
+Dari visualisasi ini terlihat terdapat data outlier dari variabel PM2.5, tetapi data ini tidak terlalu jauh dan masih memungkinkan dikarenakan bisa terjadinya polusi udara yang ekstrem.
+
+```{r}
+ispu_harian_gabung %>% 
+  filter(PM2.5 %in% boxplot.stats(PM2.5)$out)
+```
+
+#### A.2.4.2. Variabel PM10
+```{r}
+boxplot(ispu_harian_gabung$PM10)
+
+boxplot.stats(ispu_harian_gabung$PM10)$out
+```
+
+```{r}
+ispu_harian_gabung %>% 
+  filter(PM10 %in% boxplot.stats(PM10)$out)
+```
+
+Dari visualisasi ini terlihat terdapat data outlier dari variabel PM10, tetapi data ini tidak terlalu jauh dan masih memungkinkan dikarenakan bisa terjadinya polusi udara yang ekstrem.
+
+#### A.2.4.3. Variabel SO2
+```{r}
+boxplot(ispu_harian_gabung$SO2)
+
+boxplot.stats(ispu_harian_gabung$SO2)$out
+```
+
+```{r}
+ispu_harian_gabung %>% 
+  filter(SO2 %in% boxplot.stats(SO2)$out)
+```
+
+#### A.2.4.4. Variabel CO
+```{r}
+boxplot(ispu_harian_gabung$CO)
+
+boxplot.stats(ispu_harian_gabung$CO)$out
+```
+
+```{r}
+ispu_harian_gabung %>% 
+  filter(CO %in% boxplot.stats(CO)$out)
+```
+
+#### A.2.4.5. Variabel O3
+```{r}
+boxplot(ispu_harian_gabung$O3)
+
+boxplot.stats(ispu_harian_gabung$O3)$out
+```
+
+```{r}
+ispu_harian_gabung %>% 
+  filter(O3 %in% boxplot.stats(O3)$out)
+```
+
+#### A.2.4.6. Variabel NO2
+```{r}
+boxplot(ispu_harian_gabung$NO2)
+
+boxplot.stats(ispu_harian_gabung$NO2)$out
+```
+
+```{r}
+ispu_harian_gabung %>% 
+  filter(NO2 %in% boxplot.stats(NO2)$out)
+```
+
+## A.3. Agregasi Data ISPU Harian -> ISPU Bulanan
+```{r}
+# Agregasi data ispu_harian_gabung menjadi data ispu_bulanan
+ispu_bulanan <- ispu_harian_gabung %>%
+  mutate(Month = floor_date(Tanggal, "month")) %>%
+  group_by(Month) %>%
+  summarise(
+    PM2.5 = mean(PM2.5, na.rm = TRUE),
+    PM10 = mean(PM10, na.rm = TRUE),
+    SO2 = mean(SO2, na.rm = TRUE),
+    CO = mean(CO, na.rm = TRUE),
+    O3 = mean(O3, na.rm = TRUE),
+    NO2 = mean(NO2, na.rm = TRUE),
+    
+    DAYS = n()
+  )
+
+# Menambahkan variabel MAX, CRITICAL, dan CATEGORY di ispu bulanan
+ispu_bulanan$MAX <- pmax(ispu_bulanan$PM2.5, ispu_bulanan$PM10, ispu_bulanan$SO2, ispu_bulanan$CO, ispu_bulanan$O3, ispu_bulanan$NO2, na.rm = TRUE)
+
+ispu_bulanan$CRITICAL <- colnames(
+  ispu_bulanan[,c("PM2.5","PM10","SO2","CO","O3","NO2")]
+)[max.col(
+  ispu_bulanan[,c("PM2.5","PM10","SO2","CO","O3","NO2")],
+  ties.method = "first"
+)]
+
+ispu_bulanan$CATEGORY <- case_when(
+  ispu_bulanan$MAX <= 50 ~ "Good",
+  ispu_bulanan$MAX <= 100 ~ "Moderate",
+  ispu_bulanan$MAX <= 200 ~ "Unhealthly",
+  ispu_bulanan$MAX <= 300 ~ "Very Unhealthly",
+  TRUE ~ "Hazardous"
+)
+```
+
+```{r}
+# Mengecek apakah data ispu sudah diubah ke bulanan
+head(ispu_bulanan)
+summary(ispu_bulanan)
+```
+
+## A.4. Agregasi Data Cuaca Harian -> Cuaca Bulanan
+```{r}
+# Mengubah data cuaca harian menjadi bentuk bulanan
+cuaca_bulanan <- cuaca_harian %>%
+  mutate(Month = floor_date(Tanggal, "month")) %>%
+  group_by(Month) %>%
+  summarise(
+    TEMP = mean(TEMP, na.rm = TRUE),
+    HUM = mean(HUM, na.rm = TRUE),
+    RAIN = mean(RAIN, na.rm = TRUE),
+    CC = mean(CC, na.rm = TRUE),
+    WSPM = mean(WSPM, na.rm = TRUE),
+    PRES = mean(PRES, na.rm = TRUE)
+  )
+
+# Membuat variabel kategori hujan di data cuaca_bulanan
+cuaca_bulanan <- cuaca_bulanan %>%
+  mutate(
+    RAIN_CATEGORY = case_when(
+      RAIN == 0 ~ "No Rain",
+      RAIN < 5 ~ "Very Light Rain",
+      RAIN < 20 ~ "Light Rain",
+      RAIN < 50 ~ "Moderate Rain",
+      RAIN < 100 ~ "Heavy Rain",
+      TRUE ~ "Very Heavy Rain"
+    )
+  )
+
+# Membuat variabel kategori kelembaban di cuaca_bulanan
+cuaca_bulanan <- cuaca_bulanan %>%
+  mutate(
+    HUM_CATEGORY = case_when(
+      HUM < 45 ~ "Low Humidity",
+      HUM < 65 ~ "Optimal Humidity",
+      TRUE ~ "High Humidity"
+    )
+  )
+```
+
+```{r}
+# Mengecek apakah data cuaca sudah dalam bentuk bulanan
+head(cuaca_bulanan)
+summary(cuaca_bulanan)
+```
+
+## A.5. Menyiapkan Data ISPA Bulanan
+```{r}
+str(data_ispa)
+```
+
+```{r}
+# Mengubah nama variabel bulan
+# data_ispa <- data_ispa %>% rename(Month = Bulan)
+
+# Mengubah tipe data variabel bulan
+data_ispa$Month <- ymd(data_ispa$bulan)
+
+# Mengambil variabel yang ingin diambil
+data_ispa <- data_ispa %>% select(Month, Case_ISPA)
+```
+
+```{r}
+names(ispu_bulanan)
+names(data_ispa)
+names(cuaca_bulanan)
+```
+
+```{r}
+str(cuaca_bulanan)
+```
+
+## A.6. Gabungkan Keseluruhan Data ke Skala Bulanan
+
+```{r}
+# Menggabungkan data ISPU bulanan, cuaca bulanan, dan data ISPA bulanan menjadi satu data
+data_bulanan <- ispu_bulanan %>% 
+  inner_join(data_ispa, by = "Month") %>% 
+  inner_join(cuaca_bulanan, by = "Month") %>% select(Month, PM2.5, PM10, SO2, CO, O3, NO2, MAX, CRITICAL, CATEGORY,
+         TEMP, RAIN, HUM, CC, WSPM, PRES, RAIN_CATEGORY, HUM_CATEGORY, Case_ISPA)
+
+# data_bulanan menjadi dataset final untuk melanjutkan ke tahap EDA, Feature Engineering & Modeling
+write.csv(data_bulanan, "data_bulanan.csv", row.names = FALSE)
+```
+
+```{r}
+str(data_bulanan)
+```
+
+```{r}
+# Ubah tipe data pada variabel Month
+data_bulanan$Month <- as.Date(
+  paste0(data_bulanan$Month, "-01")
+)
+```
+
+```{r}
+str(data_bulanan)
+```
+
+# Bagian B. Exploratory Data Analysis (EDA)
+## B.1. Univariate Numerical
+```{r library-visualisasi}
+library(ggplot2)
+```
+
+### B.1.1. PM2.5 Distribution in Jakarta (Histogram)
+```{r}
+ggplot(ispu_cuaca_harian, aes(x = PM2.5)) +
+  geom_histogram(
+    bins = 30,
+    fill = "skyblue",
+    color = "black"
+  ) +
+  labs(
+    title = "PM2.5 Distribution in Jakarta",
+    x = "PM2.5 Concentration (µg/m³)",
+    y = "Frequency"
+  ) +
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 0)
+  )
+```
+
+### B.1.2. Boxplot of PM10 in Jakarta (Boxplot)
+```{r}
+ggplot(ispu_cuaca_harian,
+       aes(y = PM10)) +
+  geom_boxplot(fill = "red") +
+  labs(
+    title = "Boxplot of PM10 in Jakarta",
+    x = "PM10 Concentration (µg/m³)",
+    y = "Frequency"
+  ) +
+  
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 0)
+  )
+```
+
+### B.1.3. Daily Trend of PM2.5 in Jakarta (Time Series Plot)
+```{r}
+ggplot(ispu_cuaca_harian,
+       aes(x = Tanggal,
+           y = PM2.5)) +
+  geom_line(color = "red") +
+  labs(
+    title = "Daily Trend of PM2.5 in Jakarta"
+  ) +
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 0)
+  )
+```
+
+## B.2 Univariate Categorical
+### B.2.1. Distribution of Air Quality Categories in Jakarta (Daily)
+```{r}
+ggplot(ispu_cuaca_harian,
+       aes(x = CATEGORY,
+           fill = CATEGORY)) +
+
+  geom_bar() +
+
+  labs(
+    title = "Distribution of Air Quality Categories in Jakarta",
+    x = "Air Quality Categories",
+    y = "Frequency"
+  ) +
+  scale_fill_manual( values = c(
+    "Good" = "green",
+    "Moderate" = "yellow",
+    "Unhealthly" = "orange",
+    "Very Unhealthly" = "red",
+    "Hazardous" = "darkred"
+  )) +
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 10)
+  )
+```
+
+```{r}
+ggplot(ispu_gabung,
+       aes(x = CATEGORY,
+           fill = CATEGORY)) +
+
+  geom_bar() +
+
+  labs(
+    title = "Distribution of Air Quality Categories in Jakarta",
+    x = "Air Quality Categories",
+    y = "Frequency"
+  ) +
+  scale_fill_manual( values = c(
+    "Good" = "green",
+    "Moderate" = "yellow",
+    "Unhealthly" = "orange",
+    "Very Unhealthly" = "red",
+    "Hazardous" = "darkred"
+  )) +
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 10)
+  )
+```
+
+### B.2.2. Distribution of Air Pollutant in Jakarta (Daily)
+```{r}
+ggplot(ispu_harian_gabung,
+       aes(x = CRITICAL,
+           fill = CRITICAL)) +
+
+  geom_bar() +
+
+  labs(
+    title = "Distribution of Air Pollutant in Jakarta",
+    x = "Air Pollutant Category",
+    y = "Number of Observations"
+  ) +
+
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+  )
+```
+
+```{r}
+ggplot(ispu_gabung,
+       aes(x = CRITICAL,
+           fill = CRITICAL)) +
+
+  geom_bar() +
+
+  labs(
+    title = "Distribution of Air Pollutant in Jakarta",
+    x = "Air Pollutant Category",
+    y = "Number of Observations"
+  ) +
+
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+  )
+```
+
+## B.3. Bivariate
+### B.3.1. Bivariate Numerical vs Numerical
+#### B.3.1.1. Relationship Between Humidity and PM2.5 (Daily)
+```{r}
+# Hubungan Variabel Kelembaban dengan PM2.5 (Harian)
+ggplot(ispu_cuaca_harian, aes(x = HUM, y = PM2.5)) +
+  geom_point(color = "red", size = 3) +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Relationship Between Humidity and PM2.5 (Daily)",
+    x = "Humidity",
+    y = "PM2.5 Concentration (µg/m³)"
+  ) +
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+  )
+```
+
+#### B.3.1.2. Relationship Between PM2.5 and ARI Cases (Monthly)
+```{r}
+# Hubungan Variabel PM2.5 dengan kasus ISPA (Bulanan)
+ggplot(data_bulanan, aes(x = Case_ISPA, y = PM2.5)) +
+  geom_point(color = "red", size = 3) +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Relationship Between PM2.5 and ARI Cases (Monthly)",
+    x = "PM2.5 Concentration (µg/m³)",
+    y = "Cases of ISPA"
+  ) +
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+  )
+```
+
+#### B.3.1.3. Relationship Between PM10 and ARI Cases (Monthly)
+```{r}
+# Hubungan Variabel PM10 dengan kasus ISPA (Bulanan)
+ggplot(data_bulanan, aes(x = Case_ISPA, y = PM10)) +
+  geom_point(color = "red", size = 3) +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Relationship Between PM10 and ARI Cases (Monthly)",
+    x = "PM10 Concentration (µg/m³)",
+    y = "Cases of ISPA"
+  ) +
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+  )
+```
+
+### B.3.2. Bivariate Categorical vs Numerical
+#### B.3.2.1. Distribution of PM2.5 by Air Quality Category (Daily)
+```{r}
+ggplot(ispu_cuaca_harian,
+       aes(x = CATEGORY,
+             y = PM2.5,
+           fill = CATEGORY)) +
+  geom_boxplot() +
+  labs(
+    title = "Distribution of PM2.5 by Air Quality Category (Daily)",
+    x = "Air Pollutant Categories",
+    y = "PM2.5 Concentration (µg/m³)"
+  ) +
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 0)
+  )
+```
+
+#### B.3.2.2. Distribution of PM2.5 by Air Quality Category (Monthly)
+```{r}
+ggplot(data_bulanan,
+       aes(x = CATEGORY,
+             y = PM2.5,
+           fill = CATEGORY)) +
+  geom_boxplot() +
+  labs(
+    title = "Distribution of PM2.5 by Air Quality Category (Monthly)",
+    x = "Air Pollutant Categories",
+    y = "PM2.5 Concentration (µg/m³)"
+  ) +
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 0)
+  )
+```
+
+#### B.3.2.3. ARI Cases by Air Quality Categories (Monthly)
+```{r}
+ggplot(data_bulanan,
+       aes(x = CATEGORY,
+           y = Case_ISPA,
+           fill = CATEGORY)) +
+  geom_boxplot() +
+  labs(
+    title = "ARI Cases by Air Quality Categories",
+    x = "Air Pollutant Categories",
+    y = "Cases of ISPA"
+  ) +
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+  )
+```
+
+### B.3.3 Bivariate Categorical vs Categorical
+```{r library-visualisasi-bivariate}
+library(ggplot2)
+library(forcats)
+```
+
+```{r}
+# Mengurutkan kategori untuk visualisasi data
+ispu_cuaca_harian$RAIN_CATEGORY <- fct_relevel(ispu_cuaca_harian$RAIN_CATEGORY, "No Rain", "Very Light Rain","Light Rain", "Moderate Rain", "Heavy Rain")
+ispu_cuaca_harian$CATEGORY <- fct_relevel(ispu_cuaca_harian$CATEGORY, "Good", "Moderate", "Unhealthly", "Very Unhealthly", "Hazardous")
+ispu_cuaca_harian$HUM_CATEGORY <- fct_relevel(ispu_cuaca_harian$HUM_CATEGORY, "Low Humidity", "Optimal Humidity", "High Humidity")
+ispu_cuaca_harian$CRITICAL <- fct_relevel(ispu_cuaca_harian$CRITICAL, "PM2.5", "PM10", "SO2", "CO", "O3", "NO2")
+```
+
+#### B.3.3.1. Proportion of Dominant Pollutants by ISPU Category (Daily)
+```{r}
+ggplot(ispu_cuaca_harian,
+       aes(x = CATEGORY,
+           fill = CRITICAL)) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Proportion of Dominant Pollutants by ISPU Category (Daily)",
+    x = "Pollutant Category",
+    y = "Proportion of Critical Category"
+  ) + 
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 0)
+  )
+```
+
+#### B.3.3.2. Proportion of Pollutant Categories by Rainfall Category (Daily)
+```{r}
+ggplot(ispu_cuaca_harian,
+       aes(x = RAIN_CATEGORY,
+           fill = CATEGORY)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual( values = c(
+    "Good" = "green",
+    "Moderate" = "yellow",
+    "Unhealthly" = "orange",
+    "Very Unhealthly" = "red",
+    "Hazardous" = "darkred"
+  )) +
+  labs(
+    title = "Proportion of Pollutant Categories by Rainfall Category (Daily)",
+    x = "Rainfall Category",
+    y = "Proportion of Pollutant Categories"
+  ) + 
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 10)
+  )
+```
+
+#### B.3.3.3. Proportion of Pollutant Categories by Humidity Category (Daily)
+```{r}
+ggplot(ispu_cuaca_harian,
+       aes(x = HUM_CATEGORY,
+           fill = CATEGORY)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual( values = c(
+    "Good" = "green",
+    "Moderate" = "yellow",
+    "Unhealthly" = "orange",
+    "Very Unhealthly" = "red",
+    "Hazardous" = "darkred"
+  )) +
+  labs(
+    title = "Proportion of Pollutant Categories by Humidity Category (Daily)",
+    x = "Humidity Category",
+    y = "Proportion of Pollutant Categories"
+  ) + 
+  theme_minimal(base_size = 12) +
+  
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 0)
+  )
+```
+
+## B.4. Multivariate 
+### B.4.1. Correlation Matrix
+```{r library-correlation-matrix}
+library(corrplot)
+```
+
+#### B.4.1.1. Correlation Matrix of Daily Air Pollution and Weather Variables
+```{r}
+correlation_daily <- ispu_cuaca_harian[, c(
+  "PM2.5","PM10","SO2","CO","O3","NO2", "TEMP","RAIN","HUM", "WSPM","CC", "PRES"
+)]
+
+cor_matrix <- cor(correlation_daily, use = "pairwise.complete.obs")
+
+# 4. Plot
+corrplot(
+  cor_matrix,
+  method = "color",
+  addCoef.col = "black", 
+  number.cex = 0.6,
+  type = "lower",
+  tl.col = "black",
+  tl.srt = 45,
+  title = "Correlation Matrix of Daily Air Pollution and Weather Variables",
+  mar = c(0,0,2,0)
+)
+```
+
+#### B.4.1.2. Correlation Matrix of Monthly Air Pollution and Weather Variables
+```{r}
+correlation_monthly <- data_bulanan[, c(
+  "PM2.5","PM10","SO2","CO","O3","NO2", "TEMP","RAIN","HUM", "WSPM","CC", "PRES"
+  ,"Case_ISPA"
+)]
+
+cor_matrix2 <- cor(correlation_monthly, use = "pairwise.complete.obs")
+
+# 4. Plot
+corrplot(
+  cor_matrix2,
+  method = "color",
+  addCoef.col = "black", 
+  number.cex = 0.6,
+  type = "lower",
+  tl.col = "black",
+  tl.srt = 45,
+  title = "Correlation Matrix of Monthly Air Pollution and Weather Variables",
+  mar = c(0,0,2,0)
+)
+```
+
+### B.4.2. PCA (Multivariate Reduction)
+#### B.4.2.1. PCA (Daily)
+```{r library-pca}
+library(factoextra)
+```
+
+```{r}
+pca_daily <- prcomp(
+  ispu_cuaca_harian[,c(
+  "PM2.5","PM10","SO2","CO","O3","NO2", "TEMP","RAIN","HUM", "WSPM","CC", "PRES"
+)],
+  scale = TRUE
+)
+
+biplot(pca_daily, cex = 0.6)
+```
+
+```{r}
+fviz_pca_biplot(
+  pca_daily,
+  repel = TRUE,
+  col.var = "red",
+  col.ind = "grey"
+)
+
+fviz_pca_var(pca_daily)
+```
+
+#### B.4.2.2. PCA (Monthly)
+```{r}
+pca_monthly <- prcomp(
+  data_bulanan[,c(
+  "PM2.5","PM10","SO2","CO","O3","NO2", "TEMP","RAIN","HUM", "WSPM","CC", "PRES"
+  , "Case_ISPA"
+)],
+  scale = TRUE
+)
+
+biplot(pca_monthly, cex = 0.6)
+```
+
+```{r}
+fviz_pca_biplot(
+  pca_monthly,
+  repel = TRUE,
+  col.var = "red",
+  col.ind = "grey"
+)
+
+fviz_pca_var(pca_monthly)
+```
+
+## B.5. Exploratory Data Analysis (Paper) 
+### B.5.1. Fig 1 - Monthly Trend of ARI Cases from Jan 2021 - Nov 2025
+Visualisasi ini menunjukkan tren bulanan kasus ISPA dari bulan Januari 2021 - November 2025. Terlihat adanya naik-turun kasus yang terlibat sehingga dapat menyebabkan adanya hubungan dengan faktor cuaca.
+```{r}
+ggplot(data_bulanan,
+       aes(x = Month,
+           y = Case_ISPA, 
+           group = 1)) +
+  geom_line(color = "red", linewidth = 1) +
+  geom_point(color = "red", size = 2) +
+  labs(
+    title = "Monthly Trend of ARI Cases from 2021-2025",
+    x = "Month",
+    y = "Number of Cases"
+  ) +
+  
+  scale_y_continuous(labels = function(x) paste0(x, ".000")) +
+  
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+  )
+```
+
+### B.5.2. Fig 2 - Distribution of Air Quality and Meteorological Variables in Jakarta
+```{r distribusi-variabel-harian}
+# Visualisasi distribusi variabel polusi udara dan meteorologi di jakarta (Harian)
+data_visualisasi <- ispu_cuaca_harian %>%
+  pivot_longer(
+    cols = c(PM2.5, PM10, SO2, CO, O3, NO2, TEMP, RAIN, HUM, WSPM, CC, PRES),
+    names_to = "Variable",
+    values_to = "Value"
+  )
+
+ggplot(data_visualisasi, aes(x = Variable, y = Value, fill = Variable)) +
+  geom_boxplot(alpha = 0.8, outlier.colour = "red", outlier.shape = 16) +
+  
+  facet_wrap(~ Variable, scales = "free_y", ncol = 3) + 
+  
+  labs(
+    title = "Distribution of Air Quality and Meteorological Variables in Jakarta",
+    subtitle = "Each panel uses an independent y-axis scale",
+    x = NULL,
+    y = "Measured Value"
+  ) +
+  
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 10, color = "gray30", hjust = 0.5),
+    
+    strip.background = element_rect(fill = "gray95", color = "gray80"),
+    strip.text = element_text(face = "bold", color = "black"),
+    
+    axis.text.x = element_blank(), 
+    axis.ticks.x = element_blank(),
+    
+    legend.position = "none",
+    
+    panel.spacing = unit(1, "lines") 
+  )
+```
+
+```{r distribusi-variabel-bulanan}
+# Visualisasi distribusi variabel polusi udara dan meteorologi di jakarta (Bulanan)
+data_visualisasi_bulanan <- data_bulanan %>%
+  pivot_longer(
+    cols = c(PM2.5, PM10, SO2, CO, O3, NO2, TEMP, RAIN, HUM, WSPM, CC, PRES),
+    names_to = "Variable",
+    values_to = "Value"
+  )
+
+ggplot(data_visualisasi_bulanan, aes(x = Variable, y = Value, fill = Variable)) +
+  geom_boxplot(alpha = 0.8, outlier.colour = "red", outlier.shape = 16) +
+  
+  facet_wrap(~ Variable, scales = "free_y", ncol = 3) + 
+  
+  labs(
+    title = "Distribution of Air Quality and Meteorological Variables in Jakarta",
+    subtitle = "Each panel uses an independent y-axis scale",
+    x = NULL,
+    y = "Measured Value"
+  ) +
+  
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 10, color = "gray30", hjust = 0.5),
+    
+    strip.background = element_rect(fill = "gray95", color = "gray80"),
+    strip.text = element_text(face = "bold", color = "black"),
+    
+    axis.text.x = element_blank(), 
+    axis.ticks.x = element_blank(),
+    
+    legend.position = "none",
+    
+    panel.spacing = unit(1, "lines") 
+  )
+```
+
+# Bagian C. Feature Engineering
+## C.1. Mengecek Nilai Skewness
+```{r skewness}
+# Menghitung nilai skewness untuk setiap variabel
+var_numerik <- data_bulanan[, c("PM2.5", "PM10", "SO2", "CO", "O3", "NO2", 
+                                  "TEMP", "RAIN", "HUM", "CC", "WSPM", "PRES", 
+                                  "Case_ISPA")]
+
+nil_skewness <- sapply(var_numerik, skewness, na.rm = TRUE)
+print(nil_skewness)
+```
+
+Terlihat nilai skewness ada beberapa variabel yang bernilai > 0.5 atau > -0.5, jadi variabel tersebut akan dilakukan log transformasi
+```{r library-mass}
+library(MASS)
+```
+
+```{r boxcox-model}
+boxcox_model <- boxcox(O3 ~ 1, data = data_bulanan)
+
+lambda <- boxcox_model$x[which.max(boxcox_model$y)]
+```
+
+Variabel seperti CO, O3, HUM, WSPM, dan Case_ISPA akan dilakukan log transformasi sesuai dengan teknik yang akan diubah.
+```{r log-transformation}
+# Melakukan log transformation pada variabel yang nilai skewness > 0.5 atau > -0.5
+data_bulanan$log_CO <- base::log(data_bulanan$CO)
+data_bulanan$log_O3 <- (data_bulanan$O3^lambda-1) / lambda
+data_bulanan$log_HUM <- (data_bulanan$HUM)^2
+data_bulanan$log_WSPM <- base::log(data_bulanan$WSPM)
+data_bulanan$ispa_log <- base::log(data_bulanan$Case_ISPA)
+```
+
+```{r cek-nilai-skewness}
+# Mengecek kembali nilai skewness
+skewness(data_bulanan$log_CO)
+skewness(data_bulanan$log_O3)
+skewness(data_bulanan$log_HUM)
+skewness(data_bulanan$log_WSPM)
+skewness(data_bulanan$ispa_log)
+```
+
+Disini nilai skewness pada variabel kelembaban masih tinggi, sekarang mengubah teknik data transformation
+```{r sqrt-transformation}
+data_bulanan$log_HUM <- sqrt(89 - data_bulanan$HUM) 
+```
+
+```{r nilai-skewness-transformasi}
+# Cek nilai skewness pada log_HUM
+skewness(data_bulanan$log_HUM)
+```
+
+## C.2. Variabel Temporal: trend, season
+Variabel Temporal dibuat untuk menganalisis apakah terdapat keterkaitan dengan tren dan musim pada kasus penelitian tersebut.
+```{r var-temporal}
+# Variabel Trend
+data_bulanan$Trend <- 1:nrow(data_bulanan)
+
+# Variabel Season
+data_bulanan$Season <- ifelse(
+data_bulanan$Trend %in% c(1,2,3,4,11,12,13,14,15,16,23,24,25,26,27,28,35,36,37,38,39,40,47,48,49,50,51,52,59,60),
+  1,
+  0
+)
+```
+
+## C.3. Variabel Lag: ispa_lag1
+```{r var-lag}
+data_bulanan$ispa_lag1 <- lag(data_bulanan$ispa_log, n = 1)
+
+# Baris Pertama akan bernilai NA karena tidak ada bulan sebelumnya sehingga data akan dibuang
+data_bulanan <- data_bulanan[!is.na(data_bulanan$ispa_lag1), ]
+```
+
+## C.4. Standarisasi Z-Score untuk Prediktor Kontinu
+Dasar justifikasi threshold skewness (Bulmer 1979; Hair et al. 2010; George & Mallery 2010) yang disebutkan di bagian metodologi.
+```{r z-score}
+data_bulanan$PM2.5_z <- scale(data_bulanan$PM2.5)
+data_bulanan$PM10_z <- scale(data_bulanan$PM10)
+data_bulanan$SO2_z <- scale(data_bulanan$SO2)
+data_bulanan$CO_z <- scale(data_bulanan$log_CO)
+data_bulanan$O3_z <- scale(data_bulanan$log_O3)
+data_bulanan$NO2_z <- scale(data_bulanan$NO2)
+data_bulanan$TEMP_z <- scale(data_bulanan$TEMP)
+data_bulanan$RAIN_z <- scale(data_bulanan$RAIN)
+data_bulanan$HUM_z <- scale(data_bulanan$log_HUM)
+data_bulanan$WSPM_z <- scale(data_bulanan$log_WSPM)
+data_bulanan$CC_z <- scale(data_bulanan$CC)
+data_bulanan$PRES_z <- scale(data_bulanan$PRES)
+```
+
+Mengecek kembali nilai skewness setelah variabel sudah dilakukan transformasi nilai-z
+```{r cek-nilai-skew}
+# Menghitung nilai skewness untuk setiap variabel
+var_numerik2 <- data_bulanan[, c("PM2.5_z", "PM10_z", "SO2_z", "CO_z", "O3_z", "NO2_z", 
+                                  "TEMP_z", "RAIN_z", "HUM_z", "CC_z", "WSPM_z", "PRES_z", 
+                                  "Case_ISPA")]
+
+nil_skewness2 <- sapply(var_numerik2, skewness, na.rm = TRUE)
+print(nil_skewness2)
+```
+
+# Bagian D. Predictor Screening
+## D.1. Chronological Train-Test Split
+Split dilakukan secara proporsional (80% training / 20% testing) mengikuti
+urutan waktu, supaya kode tetap valid berapa pun jumlah baris data akhirnya
+(tidak bergantung pada indeks baris yang dihardcode).
+
+```{r train-test-split}
+n_total <- nrow(data_bulanan)
+n_train <- floor(0.8 * n_total)
+
+train_data <- data_bulanan[1:n_train, ]
+test_data  <- data_bulanan[(n_train + 1):n_total, ]
+```
+
+## D.2. Pearson Correlation Analysis
+```{r library-korelasi}
+library(corrplot)
+```
+
+```{r pearson-corr-1}
+# Analisis Korelasi Pearson dengan data bulanan yang belum dilakukan transformasi nilai-z dan tidak ada variabel tambahan
+predictor_vars <- data_bulanan[, c(
+  "PM2.5", "PM10", "SO2", "CO", "O3", "NO2",
+  "TEMP", "RAIN", "HUM", "CC", "WSPM", "PRES"
+)]
+
+matrix_cor <- cor(predictor_vars, method = "pearson")
+
+corrplot(matrix_cor, 
+         method = "color",
+         type = "upper",
+         addCoef.col = "black",
+         number.cex = 0.7,
+         tl.col = "black",
+         tl.srt = 45,
+         title = "Pearson Correlation Matrix of ARI & Meteorological Data",
+         mar = c(0,0,2,0))
+```
+
+```{r pearson-corr-2}
+# Analisis Korelasi Pearson dengan data bulanan yang sudah dilakukan transformasi nilai-z dan tidak ada variabel tambahan
+predictor_vars2 <- data_bulanan[, c(
+  "PM2.5_z", "PM10_z", "SO2_z", "CO_z", "O3_z", "NO2_z",
+  "TEMP_z", "RAIN_z", "HUM_z", "CC_z", "WSPM_z", "PRES_z"
+)]
+
+matrix_cor2 <- cor(predictor_vars2, method = "pearson")
+
+corrplot(matrix_cor2, 
+         method = "color",
+         type = "upper",
+         addCoef.col = "black",
+         number.cex = 0.7,
+         tl.col = "black",
+         tl.srt = 45,
+         title = "Pearson Correlation Matrix of ARI & Meteorological Data",
+         mar = c(0,0,2,0))
+```
+
+```{r pearson-corr-3}
+# Analisis Korelasi Pearson dengan data bulanan yang sudah dilakukan transformasi nilai-z dan variabel temporal
+predictor_vars3 <- data_bulanan[, c(
+  "PM2.5_z", "PM10_z", "SO2_z", "CO_z", "O3_z", "NO2_z",
+  "TEMP_z", "RAIN_z", "HUM_z", "CC_z", "WSPM_z", "PRES_z",
+  "Trend", "Season"
+)]
+
+matrix_cor3 <- cor(predictor_vars3, method = "pearson")
+
+corrplot(matrix_cor3, 
+         method = "color",
+         type = "upper",
+         addCoef.col = "black",
+         number.cex = 0.7,
+         tl.col = "black",
+         tl.srt = 45,
+         title = "Pearson Correlation Matrix of ARI & Meteorological Data",
+         mar = c(0,0,2,0))
+```
+
+## D.3. Variance Inflation Factor (VIF)
+```{r vif}
+# Melakukan analisis dengan model linear regression untuk melihat hubungan setiap variabel dari nilai VIF
+vif_model <- lm(
+  Case_ISPA ~ PM2.5_z + PM10_z + SO2_z + CO_z + O3_z + NO2_z +
+    TEMP_z + RAIN_z + HUM_z + WSPM_z + CC_z + PRES_z,
+  data = train_data
+)
+
+vif(vif_model)
+```
+
+# Bagian E. Model Development: GAM
+## E.1. Kandidat Formula GAM
+```{r library}
+library(mgcv)
+```
+
+```{r formula-gam}
+f1_gam <- Case_ISPA ~
+  s(PM2.5_z, k = 4) + s(PM10_z, k = 4) + s(SO2_z, k = 4) + s(CO_z, k = 4) +
+  s(O3_z, k = 4) + s(NO2_z, k = 4) + s(TEMP_z, k = 4) + s(RAIN_z, k = 4) + 
+  s(HUM_z, k = 4) + s(WSPM_z, k = 4) + s(CC_z, k = 4) + s(PRES_z, k = 4) + 
+  Trend + Season + ispa_lag1
+
+# Input F1
+f2_gam <- Case_ISPA ~
+  s(PM2.5_z, k = 4) + s(O3_z, k = 4) + s(TEMP_z, k = 4) + s(HUM_z, k = 4) + 
+  s(WSPM_z, k = 4) + s(PRES_z, k = 4) + ispa_lag1
+
+# Input F2
+f3_gam <- Case_ISPA ~
+  s(PM2.5_z, k = 4) + s(O3_z, k = 4) + s(TEMP_z, k = 4) + s(WSPM_z, k = 4) + 
+  s(PRES_z, k = 4) + ispa_lag1
+
+# Input F3
+f4_gam <- Case_ISPA ~
+  s(O3_z, k = 4) + s(RAIN_z, k = 4) + s(PRES_z, k = 4) + ispa_lag1
+
+# Input F4
+f5_gam <- Case_ISPA ~
+  s(SO2_z, k = 4) + s(PRES_z, k = 4) + ispa_lag1
+```
+
+## E.2. Evaluasi Seluruh Kandidat Model GAM (Training vs Testing)
+```{r evaluasi-gam}
+formula_list_gam <- list(
+  Full_Model = f1_gam,
+  StepAIC = f2_gam,
+  Vif_Model = f3_gam,
+  Variabel_Model = f4_gam,
+  Final_Model = f5_gam
+)
+
+hasil_gam <- data.frame()
+
+for(i in names(formula_list_gam)){
+  
+  model_gam <- gam(
+    formula_list_gam[[i]],
+    data = train_data,
+    method = "REML"
+  )
+  
+# Untuk prediction dan actual data training
+  pred_train_gam <- predict(model_gam, newdata = train_data)
+  actual_train_gam <- train_data$Case_ISPA
+  
+  RMSE_Train_gam <- sqrt(mean((actual_train_gam - pred_train_gam)^2))
+  MAE_Train_gam <- mean(abs(actual_train_gam - pred_train_gam))
+  MAPE_Train_gam <- mean(abs((actual_train_gam - pred_train_gam) / actual_train_gam)) * 100
+  R2_Train_gam <- 1 -sum((actual_train_gam - pred_train_gam)^2) / sum((actual_train_gam - mean(actual_train_gam))^2)
+  
+# Untuk prediction dan actual data testing
+  pred_test_gam <- predict(model_gam, newdata = test_data)
+  actual_test_gam <- test_data$Case_ISPA
+
+  RMSE_Test_gam <- sqrt(mean((actual_test_gam - pred_test_gam)^2))
+  MAE_Test_gam <- mean(abs(actual_test_gam - pred_test_gam))
+  MAPE_Test_gam <- mean(abs((actual_test_gam - pred_test_gam) / actual_test_gam)) * 100
+  R2_Test_gam <- 1 - sum((actual_test_gam - pred_test_gam)^2) / sum((actual_test_gam - mean(actual_test_gam))^2)
+
+  hasil_gam <- rbind(
+    hasil_gam,
+    data.frame(
+      Formula = i,
+      RMSE_Train = RMSE_Train_gam,
+      MAE_Train = MAE_Train_gam,
+      MAPE_Train = MAPE_Train_gam,
+      R2_Train = R2_Train_gam,
+      RMSE_Test = RMSE_Test_gam,
+      MAE_Test = MAE_Test_gam,
+      MAPE_Test = MAPE_Test_gam,
+      R2_Test = R2_Test_gam,
+      AIC = AIC(model_gam),
+      BIC = BIC(model_gam),
+      LogLik = logLik(model_gam)
+    )
+  )
+}
+
+hasil_gam
+```
+
+## E.3. Model GAM Final
+```{r gam-final}
+model_gam_final <- gam(
+  f5_gam,
+  data = train_data,
+  method = "REML"
+)
+
+summary(model_gam_final)
+gam.check(model_gam_final)
+concurvity(model_gam_final, full = TRUE)  # cek multikolinearitas
+
+# Uji asumsi residual
+shapiro.test(residuals(model_gam_final))          # normalitas
+acf(residuals(model_gam_final))                     # autokorelasi
+Box.test(residuals(model_gam_final), lag = 12, type = "Ljung-Box")
+bptest(residuals(model_gam_final) ~ fitted(model_gam_final))  # homoskedastisitas
+
+pred_train_gam_final <- predict(model_gam_final, newdata = train_data)
+pred_test_gam_final  <- predict(model_gam_final, newdata = test_data)
+actual_train_gam_final   <- train_data$Case_ISPA
+actual_test_gam_final    <- test_data$Case_ISPA
+
+metrics_gam <- data.frame(
+  Model = "GAM",
+  RMSE_Test = sqrt(mean((actual_test_gam_final - pred_test_gam_final)^2)),
+  MAE_Test  = mean(abs(actual_test_gam_final - pred_test_gam_final)),
+  MAPE_Test = mean(abs((actual_test_gam_final - pred_test_gam_final) / actual_test_gam_final)) * 100,
+  R2_Test   = 1 - sum((actual_test_gam_final - pred_test_gam_final)^2) / sum((actual_test_gam_final - mean(actual_test_gam_final))^2)
+)
+metrics_gam
+```
+
+# Bagian F. Model Development: ARIMAX
+```{r library-model-arimax}
+library(forecast)
+library(tseries)
+```
+
+## F.1. Uji Stasioneritas
+```{r stasioneritas}
+# Melakukan uji stasioneritas untuk menentukan nilai order pada model ARIMAX
+adf.test(train_data$Case_ISPA)
+train_diff <- diff(train_data$Case_ISPA)
+adf.test(train_diff)
+
+par(mfrow = c(1, 2))
+acf(train_data$Case_ISPA, main = "ACF")
+pacf(train_data$Case_ISPA, main = "PACF")
+par(mfrow = c(1, 1))
+```
+
+## F.2. Kandidat Exogenous Variables
+```{r xreg}
+xreg_fam1_train <- as.matrix(train_data[, c("PM2.5_z", "PM10_z", "NO2_z", "RAIN_z")])
+xreg_fam1_test  <- as.matrix(test_data[,  c("PM2.5_z", "PM10_z", "NO2_z", "RAIN_z")])
+
+xreg_fam2_train <- as.matrix(train_data[, c("PM2.5_z", "O3_z", "PRES_z")])
+xreg_fam2_test  <- as.matrix(test_data[,  c("PM2.5_z", "O3_z", "PRES_z")])
+```
+
+## F.3. Pencarian Order ARIMA Terbaik
+```{r order-arima-fam1}
+ma1_fam1 <- Arima(train_data$Case_ISPA, order = c(1, 1, 0), xreg = xreg_fam1_train)
+ma2_fam1 <- Arima(train_data$Case_ISPA, order = c(0, 1, 1), xreg = xreg_fam1_train)
+ma3_fam1 <- Arima(train_data$Case_ISPA, order = c(1, 1, 1), xreg = xreg_fam1_train)
+ma4_fam1 <- Arima(train_data$Case_ISPA, order = c(2, 1, 0), xreg = xreg_fam1_train)
+ma5_fam1 <- Arima(train_data$Case_ISPA, order = c(0, 1, 0), xreg = xreg_fam1_train)
+
+comparison_fam1 <- data.frame(
+  Model = c("(1,1,0)", "(0,1,1)", "(1,1,1)", "(2,1,0)", "(0,1,0)"),
+  AIC = c(AIC(ma1_fam1), AIC(ma2_fam1), AIC(ma3_fam1), AIC(ma4_fam1), AIC(ma5_fam1)),
+  BIC = c(BIC(ma1_fam1), BIC(ma2_fam1), BIC(ma3_fam1), BIC(ma4_fam1), BIC(ma5_fam1))
+)
+comparison_fam1
+```
+
+```{r order-arima-fam2}
+ma1_fam2 <- Arima(train_data$Case_ISPA, order = c(1, 1, 0), xreg = xreg_fam2_train)
+ma2_fam2 <- Arima(train_data$Case_ISPA, order = c(0, 1, 1), xreg = xreg_fam2_train)
+ma3_fam2 <- Arima(train_data$Case_ISPA, order = c(1, 1, 1), xreg = xreg_fam2_train)
+ma4_fam2 <- Arima(train_data$Case_ISPA, order = c(2, 1, 0), xreg = xreg_fam2_train)
+ma5_fam2 <- Arima(train_data$Case_ISPA, order = c(0, 1, 0), xreg = xreg_fam2_train)
+
+comparison_fam2 <- data.frame(
+  Model = c("(1,1,0)", "(0,1,1)", "(1,1,1)", "(2,1,0)", "(0,1,0)"),
+  AIC = c(AIC(ma1_fam2), AIC(ma2_fam2), AIC(ma3_fam2), AIC(ma4_fam2), AIC(ma5_fam2)),
+  BIC = c(BIC(ma1_fam2), BIC(ma2_fam2), BIC(ma3_fam2), BIC(ma4_fam2), BIC(ma5_fam2))
+)
+comparison_fam2
+```
+
+## F.4. Prediction Train dan Test Model FAM1 dan FAM2
+```{r pred-train-fam1}
+pred_train_110_fam1 <- fitted(ma1_fam1)
+pred_train_011_fam1 <- fitted(ma2_fam1)
+pred_train_111_fam1 <- fitted(ma3_fam1)
+pred_train_210_fam1 <- fitted(ma4_fam1)
+pred_train_010_fam1 <- fitted(ma5_fam1)
+```
+
+```{r pred-train-fam2}
+pred_train_110_fam2 <- fitted(ma1_fam2)
+pred_train_011_fam2 <- fitted(ma2_fam2)
+pred_train_111_fam2 <- fitted(ma3_fam2)
+pred_train_210_fam2 <- fitted(ma4_fam2)
+pred_train_010_fam2 <- fitted(ma5_fam2)
+```
+
+```{r pred-test-fam1}
+pred_test_110_fam1 <- forecast(
+  ma1_fam1,
+  h = nrow(test_data),
+  xreg = xreg_fam1_test
+)$mean
+
+pred_test_011_fam1 <- forecast(
+  ma2_fam1,
+  h = nrow(test_data),
+  xreg = xreg_fam1_test
+)$mean
+
+pred_test_111_fam1 <- forecast(
+  ma3_fam1,
+  h = nrow(test_data),
+  xreg = xreg_fam1_test
+)$mean
+
+pred_test_210_fam1 <- forecast(
+  ma4_fam1,
+  h = nrow(test_data),
+  xreg = xreg_fam1_test
+)$mean
+
+pred_test_010_fam1 <- forecast(
+  ma5_fam1,
+  h = nrow(test_data),
+  xreg = xreg_fam1_test
+)$mean
+```
+
+```{r pred-test-fam2}
+pred_test_110_fam2 <- forecast(
+  ma1_fam2,
+  h = nrow(test_data),
+  xreg = xreg_fam2_test
+)$mean
+
+pred_test_011_fam2 <- forecast(
+  ma2_fam2,
+  h = nrow(test_data),
+  xreg = xreg_fam2_test
+)$mean
+
+pred_test_111_fam2 <- forecast(
+  ma3_fam2,
+  h = nrow(test_data),
+  xreg = xreg_fam2_test
+)$mean
+
+pred_test_210_fam2 <- forecast(
+  ma4_fam2,
+  h = nrow(test_data),
+  xreg = xreg_fam2_test
+)$mean
+
+pred_test_010_fam2 <- forecast(
+  ma5_fam2,
+  h = nrow(test_data),
+  xreg = xreg_fam2_test
+)$mean
+```
+
+```{r function-evaluate-model}
+rmse <- function(actual, pred){
+  sqrt(mean((actual-pred)^2))
+}
+
+mae <- function(actual,pred){
+  mean(abs(actual-pred))
+}
+
+mape <- function(actual,pred){
+  mean(abs((actual-pred)/actual))*100
+}
+
+r2 <- function(actual,pred){
+  1-sum((actual-pred)^2)/
+    sum((actual-mean(actual))^2)
+}
+```
+
+## F.5. Evaluasi Model dengan berbagai Order dan Kandidat Variabel
+```{r}
+hasil_arima <- data.frame(
+
+Model=c("(1,1,0)",
+        "(0,1,1)",
+        "(1,1,1)",
+        "(2,1,0)",
+        "(0,1,0)"),
+
+Train_RMSE=c(
+rmse(train_data$Case_ISPA,pred_train_110_fam1),
+rmse(train_data$Case_ISPA,pred_train_011_fam1),
+rmse(train_data$Case_ISPA,pred_train_111_fam1),
+rmse(train_data$Case_ISPA,pred_train_210_fam1),
+rmse(train_data$Case_ISPA,pred_train_010_fam1)
+),
+
+Train_MAE=c(
+mae(train_data$Case_ISPA,pred_train_110_fam1),
+mae(train_data$Case_ISPA,pred_train_011_fam1),
+mae(train_data$Case_ISPA,pred_train_111_fam1),
+mae(train_data$Case_ISPA,pred_train_210_fam1),
+mae(train_data$Case_ISPA,pred_train_010_fam1)
+),
+
+Train_MAPE=c(
+mape(train_data$Case_ISPA,pred_train_110_fam1),
+mape(train_data$Case_ISPA,pred_train_011_fam1),
+mape(train_data$Case_ISPA,pred_train_111_fam1),
+mape(train_data$Case_ISPA,pred_train_210_fam1),
+mape(train_data$Case_ISPA,pred_train_010_fam1)
+),
+
+Train_R2=c(
+r2(train_data$Case_ISPA,pred_train_110_fam1),
+r2(train_data$Case_ISPA,pred_train_011_fam1),
+r2(train_data$Case_ISPA,pred_train_111_fam1),
+r2(train_data$Case_ISPA,pred_train_210_fam1),
+r2(train_data$Case_ISPA,pred_train_010_fam1)
+),
+
+Test_RMSE=c(
+rmse(test_data$Case_ISPA,pred_test_110_fam1),
+rmse(test_data$Case_ISPA,pred_test_011_fam1),
+rmse(test_data$Case_ISPA,pred_test_111_fam1),
+rmse(test_data$Case_ISPA,pred_test_210_fam1),
+rmse(test_data$Case_ISPA,pred_test_010_fam1)
+),
+
+Test_MAE=c(
+mae(test_data$Case_ISPA,pred_test_110_fam1),
+mae(test_data$Case_ISPA,pred_test_011_fam1),
+mae(test_data$Case_ISPA,pred_test_111_fam1),
+mae(test_data$Case_ISPA,pred_test_210_fam1),
+mae(test_data$Case_ISPA,pred_test_010_fam1)
+),
+
+Test_MAPE=c(
+mape(test_data$Case_ISPA,pred_test_110_fam1),
+mape(test_data$Case_ISPA,pred_test_011_fam1),
+mape(test_data$Case_ISPA,pred_test_111_fam1),
+mape(test_data$Case_ISPA,pred_test_210_fam1),
+mape(test_data$Case_ISPA,pred_test_010_fam1)
+),
+
+Test_R2=c(
+r2(test_data$Case_ISPA,pred_test_110_fam1),
+r2(test_data$Case_ISPA,pred_test_011_fam1),
+r2(test_data$Case_ISPA,pred_test_111_fam1),
+r2(test_data$Case_ISPA,pred_test_210_fam1),
+r2(test_data$Case_ISPA,pred_test_010_fam1)
+)
+)
+
+hasil_arima
+```
+
+```{r}
+hasil_arima2 <- data.frame(
+
+Model=c("(1,1,0)",
+        "(0,1,1)",
+        "(1,1,1)",
+        "(2,1,0)",
+        "(0,1,0)"),
+
+Train_RMSE_2 =c(
+rmse(train_data$Case_ISPA, pred_train_110_fam2),
+rmse(train_data$Case_ISPA, pred_train_011_fam2),
+rmse(train_data$Case_ISPA, pred_train_111_fam2),
+rmse(train_data$Case_ISPA, pred_train_210_fam2),
+rmse(train_data$Case_ISPA, pred_train_010_fam2)
+),
+
+Train_MAE_2 =c(
+mae(train_data$Case_ISPA, pred_train_110_fam2),
+mae(train_data$Case_ISPA, pred_train_011_fam2),
+mae(train_data$Case_ISPA, pred_train_111_fam2),
+mae(train_data$Case_ISPA, pred_train_210_fam2),
+mae(train_data$Case_ISPA, pred_train_010_fam2)
+),
+
+Train_MAPE_2 =c(
+mape(train_data$Case_ISPA, pred_train_110_fam2),
+mape(train_data$Case_ISPA, pred_train_011_fam2),
+mape(train_data$Case_ISPA, pred_train_111_fam2),
+mape(train_data$Case_ISPA, pred_train_210_fam2),
+mape(train_data$Case_ISPA, pred_train_010_fam2)
+),
+
+Train_R2_2=c(
+r2(train_data$Case_ISPA, pred_train_110_fam2),
+r2(train_data$Case_ISPA, pred_train_011_fam2),
+r2(train_data$Case_ISPA, pred_train_111_fam2),
+r2(train_data$Case_ISPA, pred_train_210_fam2),
+r2(train_data$Case_ISPA, pred_train_010_fam2)
+),
+
+Test_RMSE_2=c(
+rmse(test_data$Case_ISPA, pred_test_110_fam2),
+rmse(test_data$Case_ISPA, pred_test_011_fam2),
+rmse(test_data$Case_ISPA, pred_test_111_fam2),
+rmse(test_data$Case_ISPA, pred_test_210_fam2),
+rmse(test_data$Case_ISPA, pred_test_010_fam2)
+),
+
+Test_MAE_2=c(
+mae(test_data$Case_ISPA, pred_test_110_fam2),
+mae(test_data$Case_ISPA, pred_test_011_fam2),
+mae(test_data$Case_ISPA, pred_test_111_fam2),
+mae(test_data$Case_ISPA, pred_test_210_fam2),
+mae(test_data$Case_ISPA, pred_test_010_fam2)
+),
+
+Test_MAPE_2=c(
+mape(test_data$Case_ISPA, pred_test_110_fam2),
+mape(test_data$Case_ISPA, pred_test_011_fam2),
+mape(test_data$Case_ISPA, pred_test_111_fam2),
+mape(test_data$Case_ISPA, pred_test_210_fam2),
+mape(test_data$Case_ISPA, pred_test_010_fam2)
+),
+
+Test_R2_2=c(
+r2(test_data$Case_ISPA, pred_test_110_fam2),
+r2(test_data$Case_ISPA, pred_test_011_fam2),
+r2(test_data$Case_ISPA, pred_test_111_fam2),
+r2(test_data$Case_ISPA, pred_test_210_fam2),
+r2(test_data$Case_ISPA, pred_test_010_fam2)
+)
+)
+
+hasil_arima2
+```
+
+## F.6. Model ARIMAX Final
+```{r arimax-final}
+model_arimax_final <- Arima(
+  train_data$Case_ISPA,
+  order = c(2, 1, 0),
+  xreg = xreg_fam2_train
+)
+
+summary(model_arimax_final)
+coeftest(model_arimax_final)
+checkresiduals(model_arimax_final)
+
+pred_arimax <- forecast(model_arimax_final, h = nrow(test_data),
+                         xreg = xreg_fam2_test)$mean
+
+# Evaluasi Training & Testing
+pred_train_arimax <- fitted(model_arimax_final)
+actual_train_arimax <- train_data$Case_ISPA
+pred_test_arimax  <- as.numeric(pred_arimax)
+actual_test_arimax <- test_data$Case_ISPA
+
+metrics_arimax <- data.frame(
+  Model = "ARIMAX",
+  RMSE_Test = sqrt(mean((actual_test_arimax - pred_test_arimax)^2)),
+  MAE_Test  = mean(abs(actual_test_arimax - pred_test_arimax)),
+  MAPE_Test = mean(abs((actual_test_arimax - pred_test_arimax) / actual_test_arimax)) * 100,
+  R2_Test   = 1 - sum((actual_test_arimax - pred_test_arimax)^2) / sum((actual_test_arimax - mean(actual_test_arimax))^2)
+)
+
+data.frame(
+  RMSE_Train = sqrt(mean((actual_train_arimax - pred_train_arimax)^2)),
+  MAE_Train  = mean(abs(actual_train_arimax - pred_train_arimax)),
+  MAPE_Train = mean(abs((actual_train_arimax - pred_train_arimax) / actual_train_arimax)) * 100,
+  R2_Train   = 1 - sum((actual_train_arimax - pred_train_arimax)^2) / sum((actual_train_arimax - mean(actual_train_arimax))^2),
+  RMSE_Test  = metrics_arimax$RMSE_Test,
+  MAE_Test   = metrics_arimax$MAE_Test,
+  MAPE_Test  = metrics_arimax$MAPE_Test,
+  R2_Test    = metrics_arimax$R2_Test
+)
+```
+
+# Bagian E. Model Development: XGBoost
+```{r library-xgboost}
+library(xgboost)
+```
+
+## G.1. Feature Importance Awal
+```{r xgb-importance}
+vars_full <- c(
+  "PM2.5_z", "PM10_z", "SO2_z", "O3_z", "NO2_z", "TEMP_z",
+  "RAIN_z", "HUM_z", "WSPM_z", "CC_z", "PRES_z", "Trend", "Season", "ispa_lag1"
+)
+
+x_train_full <- as.matrix(train_data[, vars_full])
+y_train <- train_data$Case_ISPA
+
+set.seed(123)
+xgb_full <- xgboost(x = x_train_full, y = y_train,
+                     nrounds = 100, max_depth = 3, learning_rate = 0.1,
+                     objective = "reg:squarederror")
+
+importance_matrix <- xgb.importance(feature_names = vars_full, model = xgb_full)
+xgb.plot.importance(importance_matrix)  # -> Fig. 3 XGBoost Feature Importance
+```
+
+```{r xgboost-feature-importance}
+importance_matrix$Feature <- factor(
+  importance_matrix$Feature,
+  levels = importance_matrix$Feature[order(importance_matrix$Gain)]
+)
+
+ggplot(importance_matrix,
+       aes(x = Gain,
+           y = Feature)) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "XGBoost Feature Importance",
+    x = "Importance Score (Gain)",
+    y = "Predictor Variables"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## G.2. Progresi Penyaringan Prediktor
+```{r xgb-progresi}
+vars_M1 <- c("SO2_z", "O3_z", "TEMP_z", "RAIN_z", "CC_z", "PRES_z", "Trend", "ispa_lag1")
+vars_M2 <- c("SO2_z", "O3_z", "TEMP_z", "RAIN_z", "PRES_z", "Trend", "ispa_lag1")
+vars_M3 <- c("SO2_z", "O3_z", "TEMP_z", "PRES_z", "Trend", "ispa_lag1")
+vars_M4 <- c("SO2_z", "O3_z", "PRES_z", "Trend", "ispa_lag1")
+```
+
+## G.3. Model XGBoost Final
+```{r xgb-grid, cache=TRUE}
+mape <- function(actual, predicted) {
+  mean(
+    abs((actual - predicted) / actual)[actual != 0]
+  ) * 100
+}
+
+run_xgb <- function(vars) {
+
+  x_train <- as.matrix(train_data[, vars])
+  x_test  <- as.matrix(test_data[, vars])
+
+  y_train <- train_data$Case_ISPA
+  y_test  <- test_data$Case_ISPA
+
+
+  # Grid tuning
+  grid <- expand.grid(
+    max_depth = c(1, 2, 3),
+    nrounds   = c(30, 50, 80, 100),
+    eta  = c(0.01, 0.03, 0.05),
+    subsample = c(0.6, 0.7, 0.8)
+  )
+
+  hasil <- data.frame()
+
+  for (i in 1:nrow(grid)) {
+
+    set.seed(123)
+
+    model_xgb <- xgboost(
+      x = x_train,
+      y = y_train,
+      max_depth = grid$max_depth[i],
+      nrounds = grid$nrounds[i],
+      learning_rate = grid$eta[i],
+      subsample = grid$subsample[i],
+      objective = "reg:squarederror"
+    )
+
+    # Prediction
+    pred_train <- predict(model_xgb, x_train)
+    pred_test  <- predict(model_xgb, x_test)
+
+    # Evaluation
+    hasil <- rbind(
+      hasil,
+      data.frame(
+
+        # Parameter tuning
+        grid[i, ],
+
+        # Jumlah variabel
+        Variables = length(vars),
+
+        # Training
+        RMSE_Train =
+          sqrt(mean((y_train - pred_train)^2)),
+
+        MAE_Train =
+          mean(abs(y_train - pred_train)),
+
+        MAPE_Train =
+          mape(y_train, pred_train),
+
+        R2_Train =
+          1 -
+          sum((y_train - pred_train)^2) /
+          sum((y_train - mean(y_train))^2),
+
+        # Testing
+        RMSE_Test =
+          sqrt(mean((y_test - pred_test)^2)),
+
+        MAE_Test =
+          mean(abs(y_test - pred_test)),
+
+        MAPE_Test =
+          mape(y_test, pred_test),
+
+        R2_Test =
+          1 -
+          sum((y_test - pred_test)^2) /
+          sum((y_test - mean(y_test))^2)
+      )
+    )
+  }
+
+  # Urutkan berdasarkan RMSE testing
+  hasil[order(hasil$RMSE_Test), ]
+}
+```
+
+```{r hasil-tuning}
+hasil_tuning_M1 <- run_xgb(vars_M1)
+hasil_tuning_M2 <- run_xgb(vars_M2)
+hasil_tuning_M3 <- run_xgb(vars_M3)
+hasil_tuning_M4 <- run_xgb(vars_M4)
+```
+
+```{r hasil-keseluruhan}
+hasil_semua <- rbind(
+  hasil_tuning_M1,
+  hasil_tuning_M2,
+  hasil_tuning_M3,
+  hasil_tuning_M4
+)
+```
+
+```{r tampilkan-hasil-keseluruhan}
+hasil_semua
+```
+
+```{r}
+write.csv2(hasil_semua, file = "hasil_xgboost_baru3.csv")
+```
+
+## G.4. Model XGBoost Final
+```{r xgb-final}
+x_train_final <- as.matrix(train_data[, vars_M4])
+x_test_final  <- as.matrix(test_data[,  vars_M4])
+
+set.seed(123)
+xgb_final <- xgboost(
+  x = x_train_final, y = train_data$Case_ISPA,
+  max_depth = 2, nrounds = 100, learning_rate = 0.05, subsample = 0.8,
+  objective = "reg:squarederror"
+)
+
+pred_train_xgb_final <- predict(xgb_final, x_train_final)
+pred_test_xgb_final  <- predict(xgb_final, x_test_final)
+actual_train_xgb_final <- train_data$Case_ISPA
+actual_test_xgb_final  <- test_data$Case_ISPA
+
+metrics_xgb <- data.frame(
+  Model = "XGBoost",
+  RMSE_Test = sqrt(mean((actual_test_xgb_final - pred_test_xgb_final)^2)),
+  MAE_Test  = mean(abs(actual_test_xgb_final - pred_test_xgb_final)),
+  MAPE_Test = mean(abs((actual_test_xgb_final - pred_test_xgb_final) / actual_test_xgb_final)) * 100,
+  R2_Test   = 1 - sum((actual_test_xgb_final - pred_test_xgb_final)^2) / sum((actual_test_xgb_final - mean(actual_test_xgb_final))^2)
+)
+
+data.frame(
+  RMSE_Train = sqrt(mean((actual_train_xgb_final - pred_train_xgb_final)^2)),
+  MAE_Train  = mean(abs(actual_train_xgb_final - pred_train_xgb_final)),
+  MAPE_Train = mean(abs((actual_train_xgb_final - pred_train_xgb_final) / actual_train_xgb_final)) * 100,
+  R2_Train   = 1 - sum((actual_train_xgb_final - pred_train_xgb_final)^2) / sum((actual_train_xgb_final - mean(actual_train_xgb_final))^2),
+  RMSE_Test  = metrics_xgb$RMSE_Test,
+  MAE_Test   = metrics_xgb$MAE_Test,
+  MAPE_Test  = metrics_xgb$MAPE_Test,
+  R2_Test    = metrics_xgb$R2_Test
+)
+```
+
+# Bagian H. Model Development: SVR
+```{r library-svr}
+library(e1071)
+```
+
+## H.1. Feature Importance Awal
+```{r svr-importance}
+predictor_vars_SM1 <- c("PM2.5_z", "PM10_z", "SO2_z", "CO_z", "O3_z", "NO2_z", "TEMP_z",
+  "RAIN_z", "HUM_z", "WSPM_z", "CC_z", "PRES_z", "Trend", "Season", "ispa_lag1")
+
+svr_for_importance <- svm(
+  Case_ISPA ~ PM2.5_z + PM10_z + SO2_z + CO_z + O3_z + NO2_z + TEMP_z + RAIN_z +
+    HUM_z + WSPM_z + CC_z + PRES_z + Trend + Season + ispa_lag1,
+  data = train_data, kernel = "linear"
+)
+
+predictor_svr <- Predictor$new(
+  svr_for_importance,
+  data = train_data[, predictor_vars_SM1],
+  y = train_data$Case_ISPA
+)
+imp_svr <- FeatureImp$new(predictor_svr, loss = "rmse")
+plot(imp_svr)
+```
+
+```{r}
+ggplot(
+  imp_svr$results,
+  aes(
+    x = importance,
+    y = reorder(feature, importance)
+  )
+) +
+  geom_col(fill = "steelblue") +
+  labs(
+    title = "SVR Permutation Feature Importance",
+    x = "Importance (Increase in RMSE)",
+    y = "Predictor Variables"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## H.2. Kandidat Prediktor
+```{r svr-kandidat}
+vars_SM1 <- c("PM2.5_z", "PM10_z", "O3_z", "TEMP_z",
+              "HUM_z", "CC_z", "PRES_z", "ispa_lag1") # -> MODEL FINAL
+vars_SM2 <- c("PM2.5_z", "O3_z", "TEMP_z", "HUM_z", "CC_z", "PRES_z", "ispa_lag1")
+vars_SM3 <- c("PM2.5_z", "O3_z", "HUM_z", "CC_z", "PRES_z", "ispa_lag1")
+vars_SM4 <- c("PM2.5_z", "HUM_z", "CC_z", "PRES_z", "ispa_lag1")
+
+vars_list <- list(
+  SM1 = vars_SM1,
+  SM2 = vars_SM2,
+  SM3 = vars_SM3,
+  SM4 = vars_SM4
+)
+```
+
+## H.3. Menjalankan model SVR dengan kriteria hyperparameter model dan kandidat variabel
+```{r evaluasi-model-svr}
+run_svr <- function(vars, model_svr) {
+  
+  hasil <- data.frame()
+  
+  # Grid parameter
+  grid <- expand.grid(
+    Kernel = c("radial", "linear"),
+    Cost = c(0.1, 1, 10),
+    Epsilon = c(0.01, 0.10)
+  )
+  
+  for (i in 1:nrow(grid)) {
+    
+    set.seed(123)
+    
+    # Data training
+    x_train_svr <- train_data[, vars, drop = FALSE]
+    y_train_svr <- train_data$Case_ISPA
+    
+    # Data testing
+    x_test_svr <- test_data[, vars, drop = FALSE]
+    y_test_svr <- test_data$Case_ISPA
+    
+    # Model SVR
+    model <- svm(
+      x = x_train_svr,
+      y = y_train_svr,
+      type = "eps-regression",
+      kernel = as.character(grid$Kernel[i]),
+      cost = grid$Cost[i],
+      epsilon = grid$Epsilon[i],
+      scale = FALSE
+    )
+    
+    # Prediksi
+    pred_train_svr <- predict(model, x_train_svr)
+    pred_test_svr <- predict(model, x_test_svr)
+    
+    # Evaluasi training
+    RMSE_Train <- sqrt(mean((y_train_svr - pred_train_svr)^2))
+    MAE_Train <- mean(abs(y_train_svr - pred_train_svr))
+    MAPE_Train <- mean(abs((y_train_svr - pred_train_svr) / y_train_svr)) * 100
+    R2_Train <- 1 - sum((y_train_svr - pred_train_svr)^2) / sum((y_train_svr - mean(y_train_svr))^2)
+    
+    # Evaluasi testing
+    RMSE_Test <- sqrt(mean((y_test_svr - pred_test_svr)^2))
+    MAE_Test <- mean(abs(y_test_svr - pred_test_svr))
+    MAPE_Test <- mean(abs((y_test_svr - pred_test_svr) / y_test_svr)) * 100
+    R2_Test <- 1 - sum((y_test_svr - pred_test_svr)^2) / sum((y_test_svr - mean(y_test_svr))^2)
+    
+    # Simpan hasil
+    hasil <- rbind(
+      hasil,
+      data.frame(
+        Model = model_svr,
+        Kernel = grid$Kernel[i],
+        Cost = grid$Cost[i],
+        Epsilon = grid$Epsilon[i],
+        Variables = length(vars),
+        
+        RMSE_Train = RMSE_Train,
+        MAE_Train = MAE_Train,
+        MAPE_Train = MAPE_Train,
+        R2_Train = R2_Train,
+        
+        RMSE_Test = RMSE_Test,
+        MAE_Test = MAE_Test,
+        MAPE_Test = MAPE_Test,
+        R2_Test = R2_Test
+      )
+    )
+  }
+  
+  hasil
+}
+```
+
+```{r}
+hasil_svr <- data.frame()
+
+for (i in names(vars_list)) {
+  
+  hasil_model <- run_svr(
+    vars = vars_list[[i]],
+    model_svr = i
+  )
+  
+  hasil_svr <- rbind(
+    hasil_svr,
+    hasil_model
+  )
+}
+```
+
+```{r hasil-svr-keseluruhan}
+hasil_svr
+```
+
+```{r}
+write.csv2(hasil_svr, "hasil_svr_baru_lagi.csv")
+```
+
+```{r}
+hasil_svr %>%
+  arrange(RMSE_Test) %>%
+  head(10)
+```
+
+```{r}
+best_svr <- hasil_svr %>%
+  arrange(RMSE_Test) %>%
+  slice(1)
+
+best_svr
+```
+
+## H.4. Model SVR Final
+```{r}
+model_svr_terbaik <- best_svr$Model
+
+var_terbaik <- vars_list[[model_svr_terbaik]]
+
+var_terbaik
+```
+
+```{r svr-final}
+set.seed(123)
+svr_final <- svm(
+  x = train_data[, var_terbaik, drop = FALSE],
+  y = train_data$Case_ISPA,
+  type = "eps-regression",
+  kernel = as.character(best_svr$Kernel),
+  cost = best_svr$Cost,
+  epsilon = best_svr$Epsilon,
+  scale = FALSE
+)
+
+pred_train_svr_final <- predict(svr_final, train_data[, var_terbaik, drop = FALSE])
+pred_test_svr_final <- predict(svr_final, test_data[, var_terbaik, drop = FALSE])
+actual_train_svr_final <- train_data$Case_ISPA
+actual_test_svr_final <- test_data$Case_ISPA
+
+metrics_svr <- data.frame(
+  Model = "SVR",
+  RMSE_Test = sqrt(mean((actual_test_svr_final - pred_test_svr_final)^2)),
+  MAE_Test  = mean(abs(actual_test_svr_final - pred_test_svr_final)),
+  MAPE_Test = mean(abs((actual_test_svr_final - pred_test_svr_final) / actual_test_svr_final)) * 100,
+  R2_Test   = 1 - sum((actual_test_svr_final - pred_test_svr_final)^2) / sum((actual_test_svr_final - mean(actual_test_svr_final))^2)
+)
+
+hasil_svr_final <- data.frame(
+  RMSE_Train = sqrt(mean((actual_train_svr_final - pred_train_svr_final)^2)),
+  MAE_Train  = mean(abs(actual_train_svr_final - pred_train_svr_final)),
+  MAPE_Train = mean(abs((actual_train_svr_final - pred_train_svr_final) / actual_train_svr_final)) * 100,
+  R2_Train   = 1 - sum((actual_train_svr_final - pred_train_svr_final)^2) / sum((actual_train_svr_final - mean(actual_train_svr_final))^2),
+  RMSE_Test  = metrics_svr$RMSE_Test,
+  MAE_Test   = metrics_svr$MAE_Test,
+  MAPE_Test  = metrics_svr$MAPE_Test,
+  R2_Test    = metrics_svr$R2_Test
+)
+hasil_svr_final
+```
+
+# Bagian I. Perbandingan Akhir Semua Model
+```{r perbandingan-akhir}
+tabel_perbandingan_akhir <- bind_rows(metrics_gam, metrics_arimax,
+                                       metrics_xgb, metrics_svr)
+tabel_perbandingan_akhir
+```
+
+```{r plot-aktual-dan-prediksi-svr}
+# Plot Aktual vs Prediksi (-> Fig. 5 "Actual and Predicted the SVR Model")
+full_plot <- data.frame(
+  Bulan = data_bulanan$Month,
+  Actual = data_bulanan$Case_ISPA,
+  Predicted = c(pred_train_svr_final, pred_test_svr_final)
+)
+
+ggplot(full_plot, aes(Bulan)) +
+  geom_line(aes(y = Actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = Predicted, color = "Predicted"), linewidth = 1, linetype = "dashed") +
+  labs(title = "Actual and Predicted Monthly ARI Cases Using the SVR Model",
+       x = "Month", y = "Number of Cases", color = NULL) +
+  theme_minimal(base_size = 12)
+```
+
+```{r plot-aktual-dan-prediksi-gam}
+# Plot Aktual vs Prediksi ("Actual and Predicted the GAM Model")
+full_plot <- data.frame(
+  Bulan = data_bulanan$Month,
+  Actual = data_bulanan$Case_ISPA,
+  Predicted = c(pred_train_gam_final, pred_test_gam_final)
+)
+
+ggplot(full_plot, aes(Bulan)) +
+  geom_line(aes(y = Actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = Predicted, color = "Predicted"), linewidth = 1, linetype = "dashed") +
+  labs(title = "Actual and Predicted Monthly ARI Cases Using the GAM Model",
+       x = "Month", y = "Number of Cases", color = NULL) +
+  theme_minimal(base_size = 12)
+```
+
+
+
