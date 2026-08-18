@@ -90,7 +90,7 @@ ARI-Prediction-Jakarta/
 ```
 
 ## Results
-AAA
+GAM achieved the best predictive performance on the testing dataset, with the lowest RMSE (41.91), MAE (29.89), and MAPE (17.38%). SVR showed comparable performance, while XGBoost and ARIMAX produced higher prediction errors. The R² values were low or negative across all models, indicating limited explanatory performance on the testing data.
 
 ## Code Availability Statement
 The R code and supplementary analysis used in this study are available at the following repository: [https://jusijin.github.io/ARI-prediction-jakarta/]
