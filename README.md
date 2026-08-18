@@ -61,7 +61,88 @@ Model performance was evaluated using:
 Lower RMSE, MAE, and MAPE values indicate lower prediction errors, while a higher R² indicates better model fit.
 
 ## Repository Structure
-AAA
+ARI-Prediction-Jakarta/
+│
+├── README.md
+│
+├── R/
+│   ├── Analysis Code.Rmd
+│
+├── figures/
+│   │
+│   ├── eda/
+│   │   ├── air-quality-distribution.png
+│   │   ├── daily-distribution-variable-2.png
+│   │   ├── monthly-distribution-variable-1.png
+│   │   ├── distribution-air-pollution-daily.png
+│   │   ├── distribution-air-pollution-monthly.png
+│   │   ├── distribution-air-quality-categories.png
+│   │   ├── distribution-pm2.5.png
+│   │   ├── dist-aricases-airquality-monthly.png
+│   │   ├── dist-pm2.5-airquality-daily.png
+│   │   ├── dist-pm2.5-airquality-monthly.png
+│   │   ├── trend-monthly-ari-cases.png
+│   │   ├── daily-trend-pm2.5.png
+│   │   ├── boxplot-co.png
+│   │   ├── boxplot-no2.png
+│   │   ├── boxplot-o3.png
+│   │   ├── boxplot-pm10.png
+│   │   ├── boxplot-pm10-visualization.png
+│   │   ├── boxplot-pm2.5.png
+│   │   ├── boxplot-so2.png
+│   │   ├── relationship-pm10-ari-cases-monthly.png
+│   │   └── relationship-pm2.5-ari-cases-monthly.png
+│   │
+│   ├── correlation/
+│   │   ├── corr-matrix-dataset-daily.png
+│   │   ├── corr-matrix-dataset-monthly.png
+│   │   ├── pearson-corr-1-1.png
+│   │   ├── pearson-corr-2-1.png
+│   │   └── pearson-corr-3-1.png
+│   │
+│   ├── transformation/
+│   │   └── boxcox-variable-CO.png
+│   │
+│   ├── pca/
+│   │   ├── pca-all-variables-1.png
+│   │   ├── pca-all-variables-2.png
+│   │   ├── pca-all-variables-3.png
+│   │   ├── pca-visualization-and-caseispa-1.png
+│   │   ├── pca-visualization-and-caseispa-2.png
+│   │   └── pca-visualization-and-caseispa-3.png
+│   │
+│   ├── gam/
+│   │   ├── gam-final-1.png
+│   │   ├── gam-final-2.png
+│   │   └── plot-actual-prediction-gam-1.png
+│   │
+│   ├── arimax/
+│   │   └── arimax-final-1.png
+│   │
+│   ├── svr/
+│   │   ├── svr-importance-1.png
+│   │   ├── svr-permutation-importance.png
+│   │   └── plot-actual-prediction-svr-1.png
+│   │
+│   ├── xgboost/
+│   │   ├── xgb-importance-1.png
+│   │   └── xgboost-feature-importance-1.png
+│   │
+│   └── environmental/
+│       ├── prop-airpollution-category-humidity-category.png
+│       ├── prop-airpollution-category-ispu-daily.png
+│       ├── prop-airpollution-rainfallcategory-daily.png
+│       └── relationship-humidity-pm2.5-daily.png
+│
+├── results/
+│   ├── predictor-screening/
+│   ├── GAM/
+│   ├── ARIMAX/
+│   ├── SVR/
+│   ├── XGBoost/
+│   └── model-comparison/
+│
+└── index.html
 
 ## Results
 AAA
