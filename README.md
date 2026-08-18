@@ -74,8 +74,6 @@ The R code and supplementary analysis used in this study are available at the fo
 - Nico Handoko
 - Annisa Meta Nadjwa
 
----
-
 ## Author
 
 **Nico Handoko**
