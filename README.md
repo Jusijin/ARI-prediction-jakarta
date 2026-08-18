@@ -66,6 +66,9 @@ AAA
 ## Results
 AAA
 
+## Code Availability Statement
+The R code and supplementary analysis used in this study are available at the following repository: [(https://jusijin.github.io/ARI-prediction-jakarta/)]
+
 ## Team Members
 
 - Nico Handoko
@@ -77,8 +80,8 @@ AAA
 
 **Nico Handoko**
 
-LinkedIn:
+**LinkedIn:**
 https://www.linkedin.com/in/nico-handoko
 
-GitHub:
+**GitHub:**
 https://github.com/Jusijin
