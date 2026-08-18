@@ -76,7 +76,6 @@ ARI-Prediction-Jakarta/
 │   ├── arimax/
 │   ├── svr/
 │   ├── xgboost/
-│   └── environmental/
 │
 ├── results/
 │   ├── predictor-screening/
