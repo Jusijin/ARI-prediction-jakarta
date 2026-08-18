@@ -94,7 +94,7 @@ ARI-Prediction-Jakarta/
 AAA
 
 ## Code Availability Statement
-The R code and supplementary analysis used in this study are available at the following repository: [(https://jusijin.github.io/ARI-prediction-jakarta/)]
+The R code and supplementary analysis used in this study are available at the following repository: [https://jusijin.github.io/ARI-prediction-jakarta/]
 
 ## Team Members
 
