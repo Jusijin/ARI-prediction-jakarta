@@ -8,7 +8,7 @@ The main objective of this study is to compare the performance of statistical an
 
 ## Dataset
 The dataset consist of 59 monthly observations from January 2021 to November 2025. The variables include:
-**~ Air Quality ~**
+**Air Quality**
 - PM2.5
 - PM10
 - SO2
@@ -16,7 +16,7 @@ The dataset consist of 59 monthly observations from January 2021 to November 202
 - O3
 - NO2
 
-**~ Meteorological ~**
+**Meteorological**
 - Temperature (TEMP)
 - Humidity (HUM)
 - Rainfall (RAIN)
@@ -24,7 +24,7 @@ The dataset consist of 59 monthly observations from January 2021 to November 202
 - Cloud Cover (CC)
 - Atmospheric Pressure (PRES)
 
-**~ Temporal ~**
+**Temporal**
 - Trend
 - Season
 - ispa_lag1
