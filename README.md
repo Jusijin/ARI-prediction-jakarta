@@ -1,7 +1,7 @@
 # Predicting Acute Respiratory Infection Cases in Jakarta Based on Air Quality and Meteorological Using Statistical and Machine Learning Models
 
 ## Overview
-Acute Respiratory Infection (ARI) is one of the most common public health problems influenced by environmental factors, including air quality and meteorological factors.
+Acute Respiratory Infection (ARI) is one of the most common public health problems influenced by environmental factors, including air quality and meteorological factors. This repository contains the analysis and results of a study on monthly Acute Respiratory Infection (ARI) cases in Jakarta using air quality and meteorological data.
 
 ## Objective
 The main objective of this study is to compare the performance of statistical and machine learning models for predicting monthly ARI cases using air quality and meteorological variables.
